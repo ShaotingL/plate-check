@@ -4,7 +4,7 @@
  *  2. 回應時補上 COOP / COEP 標頭 → 頁面成為「跨來源隔離」，辨識引擎才能用多執行緒
  *  更新程式時請改下面的 CACHE 版本號，使用者下次開啟就會抓新版
  */
-const CACHE = "plate-app-v18";
+const CACHE = "plate-app-v19";
 const FILES = [
   "./",
   "fonts/barlow-condensed-latin-600-normal.woff2",

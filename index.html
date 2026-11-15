@@ -149,6 +149,12 @@
   #impText{width:100%;min-height:120px;font:14px/1.5 ui-monospace,Menlo,monospace;padding:12px;border-radius:10px;
     border:1px solid var(--hair);background:var(--asphalt);color:var(--text);outline:none;resize:vertical}
   .lic{font-size:13px;color:var(--muted);line-height:1.7} .lic a{color:var(--text)}
+  #helpLink{margin-top:14px;background:none;border:0;font-size:15px;color:var(--text);text-decoration:underline;text-underline-offset:4px}
+  .help h3{font-size:17px;font-weight:700;margin:22px 0 8px} .help h3:first-child{margin-top:4px}
+  .help ol,.help ul{margin:0;padding-left:1.4em;font-size:15px;line-height:1.75;color:#d7d8d4}
+  .help li{margin-bottom:4px} .help b{color:var(--text)}
+  .help .eg{display:block;margin:8px 0 4px;padding:10px 12px;border-radius:10px;background:var(--asphalt);border:1px solid var(--hair);
+    font:14px/1.6 ui-monospace,Menlo,monospace;color:var(--text);white-space:pre;overflow-x:auto}
   #startAlt{width:100%;margin-top:10px;padding:14px;border-radius:14px;border:1px solid var(--hair);background:none;font-size:16px;font-weight:600}
   #mclose{display:block;width:100%;margin-top:22px;font-size:19px;font-weight:800;padding:17px;border:0;border-radius:12px;
     background:var(--plate);color:var(--ink)}
@@ -230,6 +236,7 @@
   <button id="startBtn"><span>匯入名單</span></button>
   <button id="startAlt" hidden>更換名單</button>
   <div id="startErr"></div>
+  <button id="helpLink">第一次使用？看使用說明</button>
   <div class="foot">辨識在手機上進行，名單只存在這支手機</div>
 </div>
 
@@ -278,6 +285,7 @@
       <button data-tab="log">紀錄</button>
       <button data-tab="list">名單</button>
       <button data-tab="sync">設定</button>
+      <button data-tab="help">說明</button>
     </div>
     <button id="closeSheet" aria-label="關閉">✕</button>
   </div>
@@ -977,6 +985,49 @@ function renderSheet(){
       } catch(e) { $("sMsg").textContent = "連不到試算表：" + (e.message||e) + "。請確認網址和手機網路。"; }
     };
     $("sRetry").onclick = () => { lastSyncMsg=""; flushSync(); setTimeout(renderSheet, 1500); };
+  } else if (curTab==="help"){
+    // 使用說明（給第一次使用的人）
+    b.innerHTML = `<div class="help">
+      <h3>第一次使用</h3>
+      <ol>
+        <li>在瀏覽器選單按「加到主畫面」，之後點桌面上的圖示就能開啟。Android 用 Chrome，iPhone 用 Safari。</li>
+        <li>按「匯入名單」，把名單貼進去，再按「匯入並取代名單」。</li>
+        <li>按「開始掃描」，跳出相機權限時選「允許」。</li>
+        <li>鏡頭對著車子，車牌出現在框內就會自動辨識。</li>
+      </ol>
+      <h3>名單怎麼準備</h3>
+      <ul>
+        <li>在 Excel 或 Google 試算表裡，每一列放一台車。</li>
+        <li>其中一格是車牌，例如 ABC-1234。</li>
+        <li>同一列的其他格子可以放電話、姓名或車位，比對到時會顯示出來。</li>
+        <li>選取這些格子，複製，貼到「設定」最上面的框裡。</li>
+      </ul>
+      <span class="eg">ABC-1234    0912-345-678
+XYZ-5678    王小明　B2-15 車位</span>
+      <h3>掃到車之後</h3>
+      <ul>
+        <li><b>在名單內</b>：跳出綠色卡片，顯示車牌和那一列的內容。看完按「繼續掃描」。</li>
+        <li><b>不在名單</b>：畫面下方顯示紅色「不在名單」。</li>
+        <li><b>讀不到</b>：靠近一點、用「變焦」拉近，或按「手動輸入」打車牌的幾個字。</li>
+      </ul>
+      <h3>提醒方式</h3>
+      <ul>
+        <li>到「設定」可以分別開關震動、音效、唸出車牌。</li>
+        <li>關掉「不在名單也提醒」後，不在名單的車只顯示紅色，不震動也不出聲。</li>
+      </ul>
+      <h3>每天重新開始</h3>
+      <ul>
+        <li>到「紀錄」按「清除紀錄」，已到的數字會歸零，名單會保留。</li>
+        <li>「設定」裡紅色的「清除名單和紀錄」會連名單一起刪除，活動結束後再按。</li>
+      </ul>
+      <h3>需要知道的事</h3>
+      <ul>
+        <li>第一次開啟需要網路，會下載約 31 MB；之後沒有網路也能用。</li>
+        <li>名單和紀錄只存在這支手機裡，不會上傳，其他人看不到。</li>
+        <li>按中間的圓形按鈕可以暫停，相機會關閉以節省電力。</li>
+        <li>辨識偶爾會讀錯，重要的時候請用眼睛再確認一次車牌。</li>
+      </ul>
+    </div>`;
   } else {
     b.innerHTML = PLATES.length ? PLATES.map(personHTML).join("")
       : `<div class="hint" style="text-align:center;margin-top:20px">還沒有名單。到「設定」匯入。</div>`;
@@ -1022,6 +1073,7 @@ $("pauseBtn").onclick=async e=>{
  * 9. 啟動
  * ============================================================ */
 $("startAlt").onclick = () => openSheet("sync");
+$("helpLink").onclick = () => openSheet("help");
 $("startBtn").onclick = async () => {
   if (!PLATES.length){ openSheet("sync"); return; }     // 還沒有名單：先引導匯入
   $("startErr").textContent="";
