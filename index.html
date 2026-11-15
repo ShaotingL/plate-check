@@ -1,0 +1,1068 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#16181b">
+<title>車牌名單比對</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<!-- ONNX Runtime Web：在手機上執行車牌偵測（YOLOv9）與車牌專用 OCR 模型，全部為本機檔案 -->
+<script src="lib/ort.wasm.min.js"></script>
+<style>
+  /* ============================================================
+   * 設計語言：台灣車牌＋道路標誌
+   *   柏油灰底、車牌米白、路牌綠（名單內）、禁止紅（不在名單）、鈉燈琥珀（需確認）
+   *   數字與車牌用 Barlow Condensed（接近路牌／車牌的窄體字，已隨程式打包，離線可用）
+   * ============================================================ */
+  @font-face{font-family:"Plate";src:url(fonts/barlow-condensed-latin-600-normal.woff2) format("woff2");font-weight:600;font-display:swap}
+  @font-face{font-family:"Plate";src:url(fonts/barlow-condensed-latin-700-normal.woff2) format("woff2");font-weight:700;font-display:swap}
+  :root{
+    --asphalt:#16181b; --asphalt-2:#1f2226; --asphalt-3:#2a2e33; --hair:#33383e;
+    --plate:#f2f0ea; --ink:#121314; --text:#eceae4; --muted:#8d9196;
+    --green:#1e7a50; --red:#c9333c; --amber:#e9a23b;
+    --plate-font:"Plate","Barlow Condensed","Arial Narrow",sans-serif;
+    --safe-t:env(safe-area-inset-top); --safe-b:env(safe-area-inset-bottom);
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%;background:var(--asphalt);color:var(--text);overflow:hidden;
+    font-family:"Noto Sans TC","PingFang TC",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+  button{font-family:inherit;cursor:pointer;color:inherit}
+  button:focus-visible,input:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
+  svg.i{width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round;flex:none}
+  .num{font-family:var(--plate-font);font-weight:700;font-variant-numeric:tabular-nums}
+
+  /* ---- 車牌元件：米白底、黑字、內黑框、上方兩個鎖孔 ---- */
+  .tw-plate{position:relative;display:inline-flex;align-items:center;justify-content:center;white-space:nowrap;
+    font-family:var(--plate-font);font-weight:700;color:var(--ink);background:var(--plate);letter-spacing:.03em;line-height:1;
+    border-radius:.16em;padding:.2em .42em .14em;box-shadow:inset 0 0 0 .06em var(--plate),inset 0 0 0 .1em var(--ink)}
+  .tw-plate::before,.tw-plate::after{content:"";position:absolute;top:.11em;width:.11em;height:.11em;border-radius:50%;background:#b9b6ad}
+  .tw-plate::before{left:22%} .tw-plate::after{right:22%}
+  .tw-plate.empty{color:#b9b6ad}
+
+  /* ---- 路牌元件：底色＋白色內框（台灣指示標誌的做法） ---- */
+  .sign{border-radius:14px;box-shadow:inset 0 0 0 4px var(--sc),inset 0 0 0 7px rgba(255,255,255,.95)}
+  .sign.ok{--sc:var(--green);background:var(--green);color:#fff}
+  .sign.bad{--sc:var(--red);background:var(--red);color:#fff}
+  .sign.warn{--sc:var(--amber);background:var(--amber);color:var(--ink);box-shadow:inset 0 0 0 4px var(--amber),inset 0 0 0 7px var(--ink)}
+
+  /* ============================================================
+   * 開始畫面
+   * ============================================================ */
+  #start{position:fixed;inset:0;z-index:20;display:flex;flex-direction:column;
+    padding:calc(28px + var(--safe-t)) 28px calc(24px + var(--safe-b));background:var(--asphalt)}
+  #start .brand{font-size:15px;color:var(--muted)}
+  #start .hero{flex:1;display:flex;flex-direction:column;justify-content:center}
+  #heroPlate{font-size:min(19vw,96px);align-self:flex-start;margin-bottom:34px;transform:rotate(-2deg);
+    box-shadow:inset 0 0 0 .06em var(--plate),inset 0 0 0 .1em var(--ink),0 18px 40px rgba(0,0,0,.45)}
+  #start h1{font-size:34px;line-height:1.2;font-weight:800;margin:0 0 10px;letter-spacing:.02em}
+  #start .lead{color:var(--muted);font-size:16px;line-height:1.7;margin:0}
+  .figures{display:flex;margin:30px 0 0;border-top:1px solid var(--hair)}
+  .figures div{flex:1;padding:14px 0 0}
+  .figures div+div{border-left:1px solid var(--hair);padding-left:16px}
+  .figures b{display:block;font-family:var(--plate-font);font-weight:700;font-size:40px;line-height:1}
+  .figures span{font-size:13px;color:var(--muted)}
+  #startBtn{width:100%;margin-top:30px;font-size:19px;font-weight:800;padding:19px;border:0;border-radius:14px;
+    background:var(--plate);color:var(--ink);display:flex;align-items:center;justify-content:center;gap:10px}
+  #startBtn:disabled{opacity:.6}
+  #startErr{color:#ff8b92;font-size:14px;margin-top:14px;line-height:1.6}
+  #start .foot{font-size:13px;color:#61666c;margin-top:16px;text-align:center}
+
+  /* ============================================================
+   * 掃描畫面：上方相機、下方固定操作區
+   * ============================================================ */
+  #stage{position:fixed;inset:0;display:flex;flex-direction:column}
+  #view{position:relative;flex:1;overflow:hidden;background:#000}
+  video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+
+  /* 頂部狀態：小而安靜 */
+  #topbar{position:absolute;left:12px;right:12px;top:calc(12px + var(--safe-t));display:flex;gap:8px;align-items:center;z-index:2}
+  .tag{color:var(--text);display:flex;align-items:center;gap:7px;height:34px;padding:0 12px;border-radius:9px;font-size:14px;
+    background:rgba(22,24,27,.86);border:1px solid rgba(255,255,255,.08);white-space:nowrap}
+  .tag svg.i{width:17px;height:17px}
+  .spacer{flex:1}
+  #modePill .dot{width:8px;height:8px;border-radius:50%;background:#3fcf8e;animation:blink 1.6s ease-in-out infinite}
+  #modePill.slow .dot{background:var(--amber);animation:none} #modePill.off .dot{background:#6b7075;animation:none}
+  @keyframes blink{50%{opacity:.35}}
+  #arrivedChip .num{font-size:19px}
+  #syncChip.warn{color:var(--amber)} #syncChip.off{color:var(--muted)}
+
+  /* 辨識範圍：細框角 */
+  #guide{position:absolute;left:6%;right:6%;top:18%;bottom:14%;--c:rgba(255,255,255,.9)}
+  #guide .c{position:absolute;width:30px;height:30px;border:3px solid var(--c);transition:border-color .15s}
+  #guide .tl{left:0;top:0;border-right:0;border-bottom:0;border-top-left-radius:8px}
+  #guide .tr{right:0;top:0;border-left:0;border-bottom:0;border-top-right-radius:8px}
+  #guide .bl{left:0;bottom:0;border-right:0;border-top:0;border-bottom-left-radius:8px}
+  #guide .br{right:0;bottom:0;border-left:0;border-top:0;border-bottom-right-radius:8px}
+  #guide.ok{--c:#3fcf8e} #guide.bad{--c:#ff5a63} #guide.warn{--c:var(--amber)}
+  #guideTip{position:absolute;left:0;right:0;bottom:calc(14% - 28px);text-align:center;font-size:13px;color:rgba(255,255,255,.8);
+    text-shadow:0 1px 3px rgba(0,0,0,.9)}
+  #zoomRow{position:absolute;left:50%;transform:translateX(-50%);bottom:12px;width:min(78%,360px);display:flex;align-items:center;gap:10px;
+    padding:6px 12px;border-radius:10px;background:rgba(22,24,27,.86);font-size:13px;z-index:2}
+  #zoomVal{font-family:var(--plate-font);font-weight:600;font-size:16px;min-width:34px;text-align:right}
+  input[type=range]{flex:1;-webkit-appearance:none;appearance:none;height:3px;border-radius:3px;background:#4a4f55}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;height:22px;border-radius:50%;background:var(--plate);border:2px solid var(--ink)}
+
+  /* 下方操作區 */
+  #dock{background:var(--asphalt);border-top:1px solid var(--hair);padding:14px 16px calc(12px + var(--safe-b))}
+  /* 判定列：待機＝灰字提示；判定後＝路牌 */
+  #banner{display:flex;align-items:center;gap:14px;min-height:74px;padding:12px 16px;border-radius:14px;background:var(--asphalt-2)}
+  #banner .tw-plate{font-size:30px;flex:none}
+  #banner .txt{min-width:0}
+  #banner .big{font-size:18px;font-weight:700;line-height:1.3}
+  #banner .small{font-size:13px;color:var(--muted);margin-top:2px;line-height:1.45}
+  #banner.ok,#banner.bad,#banner.warn{padding:12px 18px}
+  #banner.ok{background:var(--green)} #banner.bad{background:var(--red)} #banner.warn{background:var(--amber);color:var(--ink)}
+  #banner.ok .big,#banner.bad .big,#banner.warn .big{font-size:22px;font-weight:800}
+  #banner.ok .small,#banner.bad .small{color:rgba(255,255,255,.9)} #banner.warn .small{color:rgba(18,19,20,.8)}
+  #raw{margin:8px 2px 0;font-size:12px;color:#6b7075;min-height:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .controls{display:flex;align-items:center;justify-content:space-between;margin-top:10px}
+  .ctl{display:flex;align-items:center;gap:8px;height:48px;padding:0 14px;border-radius:12px;border:1px solid var(--hair);
+    background:var(--asphalt-2);font-size:15px;font-weight:600;min-width:112px;justify-content:center}
+  #pauseBtn{width:68px;height:68px;border-radius:50%;border:4px solid var(--plate);background:transparent;display:grid;place-items:center;padding:0}
+  #pauseBtn svg{width:26px;height:26px;fill:var(--plate);stroke:none}
+  #pauseBtn.on{background:var(--plate)} #pauseBtn.on svg{fill:var(--ink)}
+  #pauseBtn .lbl{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+
+  /* ============================================================
+   * 比對成功：整張卡片就是一面路牌
+   * ============================================================ */
+  #match{position:fixed;inset:0;z-index:30;display:none;align-items:center;justify-content:center;
+    padding:calc(18px + var(--safe-t)) 16px calc(18px + var(--safe-b));background:rgba(10,11,12,.82)}
+  #match.show{display:flex}
+  #match.show #mcard{animation:raise .2s ease-out}
+  @keyframes raise{from{transform:translateY(14px);opacity:0}to{transform:none;opacity:1}}
+  #mcard{width:100%;max-width:470px;max-height:100%;overflow:auto;padding:26px 22px 22px;border-radius:22px;
+    --sc:var(--green);background:var(--green);color:#fff;box-shadow:inset 0 0 0 6px var(--sc),inset 0 0 0 10px #fff,0 30px 70px rgba(0,0,0,.6)}
+  #mcard.warn{--sc:var(--amber);background:var(--amber);color:var(--ink);box-shadow:inset 0 0 0 6px var(--amber),inset 0 0 0 10px var(--ink),0 30px 70px rgba(0,0,0,.6)}
+  #mhead{font-size:30px;font-weight:800;text-align:center;line-height:1.25}
+  #mhead small{display:block;font-size:15px;font-weight:600;opacity:.9;margin-top:4px}
+  #mplate{display:flex;width:100%;font-size:min(16vw,82px);margin:22px 0 18px}
+  #mowners{border-top:2px solid rgba(255,255,255,.35)}
+  #mcard.warn #mowners{border-top-color:rgba(18,19,20,.3)}
+  .mowner{display:flex;align-items:baseline;justify-content:center;gap:12px;padding:12px 0 2px}
+  .mphone{font-family:var(--plate-font);font-weight:700;font-size:min(13vw,58px);line-height:1;letter-spacing:.02em}
+  .mtext{font-size:26px;font-weight:700;line-height:1.35;text-align:center;overflow-wrap:anywhere}
+  #impText{width:100%;min-height:120px;font:14px/1.5 ui-monospace,Menlo,monospace;padding:12px;border-radius:10px;
+    border:1px solid var(--hair);background:var(--asphalt);color:var(--text);outline:none;resize:vertical}
+  .lic{font-size:13px;color:var(--muted);line-height:1.7} .lic a{color:var(--text)}
+  #startAlt{width:100%;margin-top:10px;padding:14px;border-radius:14px;border:1px solid var(--hair);background:none;font-size:16px;font-weight:600}
+  #mclose{display:block;width:100%;margin-top:22px;font-size:19px;font-weight:800;padding:17px;border:0;border-radius:12px;
+    background:var(--plate);color:var(--ink)}
+
+  /* ============================================================
+   * 抽屜：手動／紀錄／名單／設定
+   * ============================================================ */
+  #scrim{position:fixed;inset:0;z-index:24;background:rgba(0,0,0,.55);opacity:0;pointer-events:none;transition:opacity .2s}
+  #scrim.show{opacity:1;pointer-events:auto}
+  #sheet{position:fixed;left:0;right:0;bottom:0;height:80vh;background:var(--asphalt-2);border-radius:18px 18px 0 0;
+    transform:translateY(102%);transition:transform .26s cubic-bezier(.2,.8,.2,1);z-index:25;display:flex;flex-direction:column}
+  #sheet.open{transform:none}
+  #sheet .grab{width:40px;height:4px;border-radius:4px;background:#4a4f55;margin:10px auto 2px}
+  #sheetHead{display:flex;align-items:flex-end;padding:0 8px 0 16px;border-bottom:1px solid var(--hair)}
+  .seg{flex:1;display:flex;gap:4px}
+  .seg button{flex:1;font-size:16px;font-weight:600;padding:14px 0 12px;border:0;background:none;color:var(--muted);
+    border-bottom:3px solid transparent}
+  .seg button.sel{color:var(--text);border-bottom-color:var(--plate)}
+  #closeSheet{width:44px;height:44px;margin-bottom:4px;border:0;background:none;color:var(--muted);font-size:20px}
+  #sheetBody{flex:1;overflow:auto;padding:16px 16px calc(20px + var(--safe-b))}
+  #manual{width:100%;font-family:var(--plate-font);font-weight:700;font-size:40px;letter-spacing:.06em;text-transform:uppercase;
+    padding:10px 16px;border-radius:10px;border:0;background:var(--plate);color:var(--ink);
+    box-shadow:inset 0 0 0 3px var(--plate),inset 0 0 0 5px var(--ink);outline:none}
+  #manual::placeholder{color:#b9b6ad;font-family:"Noto Sans TC",sans-serif;font-size:20px;letter-spacing:0;font-weight:500}
+  .item{display:flex;align-items:center;gap:14px;padding:14px 2px;border-bottom:1px solid var(--hair)}
+  .item .tw-plate{font-size:24px;flex:none}
+  .item .who{flex:1;min-width:0;font-size:14px;line-height:1.55;color:#c9cbc8}
+  .item .who .num{font-size:17px;font-weight:600;color:var(--text)}
+  .state{font-size:13px;font-weight:700;white-space:nowrap;display:flex;align-items:center;gap:6px}
+  .state::before{content:"";width:8px;height:8px;border-radius:50%;background:currentColor}
+  .state.ok{color:#3fcf8e} .state.bad{color:#ff6b73} .state.wait{color:#6b7075}
+  .hint{font-size:14px;color:var(--muted);line-height:1.6}
+  .res{margin:16px 0 4px;font-size:15px;font-weight:700} .res.ok{color:#3fcf8e} .res.warn{color:var(--amber)} .res.bad{color:#ff6b73}
+  .row{display:flex;justify-content:space-between;align-items:center;gap:8px;padding-bottom:8px}
+  .kpi{font-size:15px;color:var(--muted)} .kpi .num{font-size:34px;color:var(--text);margin-right:4px}
+  .mini{font-size:13px;padding:8px 12px;border-radius:9px;border:1px solid var(--hair);background:none;color:var(--muted)}
+  .group{margin-bottom:26px}
+  .group h3{font-size:15px;font-weight:700;margin:0 0 4px}
+  .sw{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 0;border-bottom:1px solid var(--hair);font-size:16px}
+  .sw small{display:block;font-size:13px;color:var(--muted);margin-top:2px}
+  .sw input{appearance:none;-webkit-appearance:none;flex:none;width:52px;height:30px;border-radius:30px;background:#4a4f55;position:relative;
+    transition:background .15s;cursor:pointer;margin:0}
+  .sw input::after{content:"";position:absolute;top:3px;left:3px;width:24px;height:24px;border-radius:50%;background:#fff;transition:left .15s}
+  .sw input:checked{background:var(--green)} .sw input:checked::after{left:25px}
+  .field{margin-top:14px} .field label{display:block;font-size:13px;color:var(--muted);margin-bottom:6px}
+  .field input{width:100%;font-size:15px;padding:12px;border-radius:10px;border:1px solid var(--hair);background:var(--asphalt);color:var(--text);outline:none}
+  .field input:focus{border-color:var(--plate)}
+  .btnrow{display:flex;gap:10px;margin-top:16px}
+  .btn{flex:1;padding:14px;border-radius:10px;font-size:15px;font-weight:700;border:1px solid var(--hair)}
+  .btn.primary{background:var(--plate);color:var(--ink);border-color:var(--plate)} .btn.ghost{background:none;color:var(--text)}
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-kbd" viewBox="0 0 24 24"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 13h.01M18 13h.01M9 15.5h6"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/></symbol>
+  <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M17.5 19a4.5 4.5 0 1 0-1.2-8.84A6 6 0 0 0 4.5 13.5 3.5 3.5 0 0 0 7 19z"/></symbol>
+  <symbol id="i-car" viewBox="0 0 24 24"><path d="M5 17h14M6 17v2M18 17v2M3 13l2-6h14l2 6v4H3z"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z"/></symbol>
+</svg>
+
+<!-- ========== 開始畫面 ========== -->
+<div id="start">
+  <div class="brand">車牌名單比對</div>
+  <div class="hero">
+    <span id="heroPlate" class="tw-plate">READY</span>
+    <h1 id="heroTitle">先匯入名單</h1>
+    <p class="lead" id="heroLead">貼上或選擇一份車牌名單，就能開始用鏡頭比對。</p>
+    <div class="figures">
+      <div><b id="stPeople">0</b><span>名單筆數</span></div>
+      <div><b id="stPlates">0</b><span>車牌</span></div>
+      <div><b id="stArrived">0</b><span>已到</span></div>
+    </div>
+  </div>
+  <p id="listInfo" hidden></p>
+  <button id="startBtn"><span>匯入名單</span></button>
+  <button id="startAlt" hidden>更換名單</button>
+  <div id="startErr"></div>
+  <div class="foot">辨識在手機上進行，名單只存在這支手機</div>
+</div>
+
+<!-- ========== 掃描畫面 ========== -->
+<div id="stage">
+  <div id="view">
+    <video id="video" playsinline muted autoplay></video>
+    <div id="guide"><i class="c tl"></i><i class="c tr"></i><i class="c bl"></i><i class="c br"></i></div>
+    <canvas id="ov" style="position:absolute;pointer-events:none"></canvas>
+    <div id="guideTip">車牌在框內任何位置都可以</div>
+    <div id="topbar">
+      <div id="modePill" class="tag"><span class="dot"></span><span id="modeTxt">準備中</span></div>
+      <div class="spacer"></div>
+      <button id="arrivedChip" class="tag" aria-label="已到車輛"><span class="num" id="arrN">0</span><span>/ <span id="arrT">0</span> 已到</span></button>
+      <button id="syncChip" class="tag off" aria-label="同步狀態"><svg class="i"><use href="#i-cloud"/></svg><span id="syncTxt">未設定</span></button>
+    </div>
+    <div id="zoomRow" style="display:none"><span>變焦</span><input id="zoom" type="range" aria-label="變焦"><span id="zoomVal"></span></div>
+  </div>
+
+  <div id="dock">
+    <div id="banner"><div class="txt"><div class="big">載入辨識模型中</div><div class="small">約需數秒</div></div></div>
+    <div id="raw"></div>
+    <div class="controls">
+      <button class="ctl" id="manualBtn"><svg class="i"><use href="#i-kbd"/></svg>手動輸入</button>
+      <button id="pauseBtn" aria-label="暫停"><svg><use href="#i-pause"/></svg><span class="lbl">暫停</span></button>
+      <button class="ctl" id="listBtn"><svg class="i"><use href="#i-list"/></svg>名單</button>
+    </div>
+  </div>
+</div>
+
+<!-- ========== 比對成功：路牌卡片 ========== -->
+<div id="match"><div id="mcard">
+  <div id="mhead"></div>
+  <div id="mplate" class="tw-plate"></div>
+  <div id="mowners"></div>
+  <button id="mclose">繼續掃描</button>
+</div></div>
+
+<!-- ========== 抽屜 ========== -->
+<div id="scrim"></div>
+<div id="sheet">
+  <div class="grab"></div>
+  <div id="sheetHead">
+    <div class="seg">
+      <button data-tab="manual" class="sel">手動</button>
+      <button data-tab="log">紀錄</button>
+      <button data-tab="list">名單</button>
+      <button data-tab="sync">設定</button>
+    </div>
+    <button id="closeSheet" aria-label="關閉">✕</button>
+  </div>
+  <div id="sheetBody"></div>
+</div>
+
+
+
+<script>
+/* ============================================================
+ * 1. 名單資料
+ *    名單由使用者匯入，只存在這支手機的瀏覽器（localStorage），程式本身不含任何名單
+ *    每筆格式：{plate: "ABC-1234", info: "要顯示的內容（電話、姓名、車位…）"}
+ * ============================================================ */
+const ROSTER_KEY = "plate-roster-v1";
+let ROSTER = [];
+try { ROSTER = JSON.parse(localStorage.getItem(ROSTER_KEY) || "[]"); } catch(e) {}
+const saveRoster = () => { try { localStorage.setItem(ROSTER_KEY, JSON.stringify(ROSTER)); } catch(e) {} };
+
+/** HTML 跳脫：名單內容是外部輸入，放進畫面前一律跳脫 */
+const esc = t => String(t ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+/* ============================================================
+ * 2. 比對工具
+ * ============================================================ */
+/** 正規化：大寫、只留英數字 */
+const norm = s => (s||"").toUpperCase().replace(/[^A-Z0-9]/g,"");
+/** 寬鬆化：OCR 常見混淆字元映射為同一代表字（O/D/Q→0、I/L/T→1、Z→2、S→5、B/3→8、G→6） */
+const LOOSE = {O:"0",D:"0",Q:"0",U:"0",I:"1",L:"1",T:"1",J:"1",Z:"2",S:"5",B:"8","3":"8",G:"6"};
+const loose = s => s.replace(/[ODQUILTJZSBG3]/g, c => LOOSE[c]);
+
+/** 名單車牌索引（同一車牌出現多筆時合併顯示內容） */
+let PLATES = [];
+function buildIndex(){
+  const m = new Map();
+  for (const r of ROSTER){
+    const key = norm(r.plate); if (!key) continue;
+    if (!m.has(key)) m.set(key, {plate:r.plate, key, loose:loose(key), owners:[]});
+    if (r.info && !m.get(key).owners.some(o=>o.info===r.info)) m.get(key).owners.push({info:r.info});
+  }
+  PLATES = [...m.values()];
+}
+buildIndex();
+
+/** 判斷一個儲存格是不是車牌：只含英數與連字號、5–8 碼、同時有英文和數字 */
+function looksLikePlate(cell){
+  const t = String(cell||"").trim().toUpperCase();
+  if (!/^[A-Z0-9][A-Z0-9\- ]*$/.test(t)) return false;
+  const n = norm(t);
+  return n.length>=5 && n.length<=8 && /[A-Z]/.test(n) && /\d/.test(n) && (t.match(/-/g)||[]).length<=1;
+}
+
+/**
+ * 解析匯入的名單文字（從試算表複製貼上的 Tab 分隔，或 CSV）
+ *  - 每一列自動找出車牌欄（可用「、」「/」「;」分隔多組車牌）
+ *  - 其餘非空欄位合併成顯示內容；第一欄若只是流水號則略過
+ *  - 沒有車牌的列（標題列、不開車的人）自動跳過
+ * 回傳 {rows:[{plate,info}], skipped:數量}
+ */
+function parseRoster(text){
+  const rows=[]; let skipped=0;
+  for (const line of String(text||"").split(/\r?\n/)){
+    if (!line.trim()) continue;
+    const cells = (line.includes("\t") ? line.split("\t") : splitCSV(line)).map(c=>c.trim());
+    const plates=[], rest=[];
+    cells.forEach((c,i)=>{
+      const parts = c.split(/[、\/;；,，]/).map(x=>x.trim()).filter(Boolean);
+      if (parts.length && parts.every(looksLikePlate)) plates.push(...parts.map(x=>x.toUpperCase()));
+      else if (c && !(i===0 && /^\d{1,4}$/.test(c))) rest.push(c);
+    });
+    if (!plates.length){ skipped++; continue; }
+    for (const pl of plates) rows.push({plate:pl, info:rest.join("　")});
+  }
+  return {rows, skipped};
+}
+/** 簡易 CSV 分欄（支援雙引號包住的欄位） */
+function splitCSV(line){
+  const out=[]; let cur="", q=false;
+  for (let i=0;i<line.length;i++){ const ch=line[i];
+    if (q){ if (ch==='"'){ if (line[i+1]==='"'){cur+='"';i++;} else q=false; } else cur+=ch; }
+    else if (ch==='"') q=true; else if (ch===","){ out.push(cur); cur=""; } else cur+=ch; }
+  out.push(cur); return out;
+}
+/** 套用新名單（取代舊名單） */
+function setRoster(rows){ ROSTER = rows; saveRoster(); buildIndex(); refreshStart(); }
+
+/** Levenshtein 編輯距離 */
+function lev(a,b){
+  const d=[...Array(a.length+1)].map((_,i)=>[i]);
+  for(let j=1;j<=b.length;j++) d[0][j]=j;
+  for(let i=1;i<=a.length;i++) for(let j=1;j<=b.length;j++)
+    d[i][j]=Math.min(d[i-1][j]+1,d[i][j-1]+1,d[i-1][j-1]+(a[i-1]===b[j-1]?0:1));
+  return d[a.length][b.length];
+}
+
+/**
+ * 在 OCR 讀到的字串中找名單車牌。
+ * OCR 結果常多出邊框雜訊字元，所以用「滑動視窗」在整串中找子字串。
+ * 回傳 {plate, dist}：dist=0 完全符合（容錯後）、1 差一字；找不到回傳 null
+ */
+function findInList(text){
+  const N = norm(text), L = loose(N);
+  if (L.length < 4) return null;
+  // 先找逐字完全相同（最可信）
+  for (const p of PLATES) if (N.includes(p.key)) return {plate:p, dist:0, exact:true};
+  let best = null;
+  for (const p of PLATES){
+    const n = p.loose.length;
+    if (L.includes(p.loose)) return {plate:p, dist:0, exact:false};   // 易混字元容錯後相同
+    if (n < 6) continue;                       // 短車牌不做模糊比對，避免誤判
+    for (let w=n-1; w<=n+1; w++)
+      for (let i=0; i+w<=L.length; i++){
+        const d = lev(L.substr(i,w), p.loose);
+        if (d<=1 && (!best || d<best.dist)) best = {plate:p, dist:d};
+      }
+  }
+  return best;
+}
+
+/** 從 OCR 文字抽出「看起來像台灣車牌」的字串（2–4 碼 - 2–4 碼，或 5–7 碼英數） */
+function plateLike(text){
+  const t = (text||"").toUpperCase().replace(/[—–_=~]/g,"-");
+  const m = t.match(/[A-Z0-9]{2,4}\s?-\s?[A-Z0-9]{2,4}/);
+  if (m) return m[0].replace(/\s/g,"");
+  const c = norm(t);
+  return (c.length>=5 && c.length<=7 && /\d/.test(c)) ? c : null;
+}
+
+/* ============================================================
+ * 3. 狀態與紀錄（存在本機瀏覽器 localStorage）
+ * ============================================================ */
+const LOG_KEY = "plate-scan-log-v2";
+let log = [];
+try { log = JSON.parse(localStorage.getItem(LOG_KEY)||"[]"); } catch(e){}
+const saveLog = () => { try{ localStorage.setItem(LOG_KEY, JSON.stringify(log.slice(0,300))); }catch(e){} };
+
+/** 新增一筆掃描紀錄（同一車牌 60 秒內不重複記錄） */
+function addLog(plate, inList){
+  const now = Date.now();
+  if (log.length && log[0].plate===plate && now-log[0].t<60000) return;
+  log.unshift({plate, inList, t:now}); saveLog();
+  enqueueSync({t:now, read:plate, plate:inList?plate:"", inList});     // 排入 Google 試算表上傳佇列
+  if (typeof updateArrived==="function") refreshStart();
+{ const last = log.find(l=>l.inList); if (last) $("heroPlate").textContent = last.plate; }
+  if (sheet.classList.contains("open") && curTab!=="manual") renderSheet();
+}
+
+/* ============================================================
+ * 3b. Google 試算表同步
+ *     - 每筆掃描紀錄先存入本機佇列（localStorage），再上傳到 Apps Script 網頁應用程式
+ *     - 上傳成功才從佇列移除；沒網路時保留，每 15 秒或恢復連線時自動重試
+ *     - 以 text/plain 傳送 JSON（簡單請求，不觸發 CORS 預檢）
+ * ============================================================ */
+const SYNC_KEY = "plate-sync-v1", QUEUE_KEY = "plate-sync-queue-v1";
+let syncCfg = {url:"", token:"", device:"手機1"};
+let queue = [], syncing = false, lastSyncMsg = "";
+try { syncCfg = Object.assign(syncCfg, JSON.parse(localStorage.getItem(SYNC_KEY)||"{}")); } catch(e){}
+try { queue = JSON.parse(localStorage.getItem(QUEUE_KEY)||"[]"); } catch(e){}
+const saveQueue = () => { try{ localStorage.setItem(QUEUE_KEY, JSON.stringify(queue)); }catch(e){} };
+const saveCfg = () => { try{ localStorage.setItem(SYNC_KEY, JSON.stringify(syncCfg)); }catch(e){} };
+
+function enqueueSync(item){ queue.push(item); saveQueue(); updateSyncState(); flushSync(); }
+
+/** 上傳佇列中所有紀錄（一次一批） */
+async function flushSync(){
+  if (syncing || !syncCfg.url || !queue.length || !navigator.onLine) { updateSyncState(); return; }
+  syncing = true; updateSyncState();
+  const batch = queue.slice(0, 50);
+  try {
+    const res = await fetch(syncCfg.url, {method:"POST", body: JSON.stringify({token:syncCfg.token, device:syncCfg.device, items:batch})});
+    const j = await res.json();
+    if (!j.ok) throw new Error(j.error || "伺服器拒絕");
+    queue.splice(0, batch.length); saveQueue();
+    lastSyncMsg = "";
+  } catch(e) {
+    lastSyncMsg = "上傳失敗：" + (e.message || e);
+  } finally {
+    syncing = false; updateSyncState();
+    if (queue.length && !lastSyncMsg) flushSync();      // 還有剩就繼續傳
+  }
+}
+setInterval(flushSync, 15000);
+window.addEventListener("online", flushSync);
+
+/** 底部同步狀態列 */
+function updateSyncState(){
+  const chip = document.getElementById("syncChip"), t = document.getElementById("syncTxt"); if (!chip) return;
+  t.textContent = !syncCfg.url ? "未設定" : syncing ? "上傳中" : lastSyncMsg ? `待傳 ${queue.length}`
+    : queue.length ? `待傳 ${queue.length}` : "已同步";
+  chip.className = "tag " + (!syncCfg.url ? "off" : lastSyncMsg ? "warn" : "");
+  chip.title = lastSyncMsg || "";
+}
+
+/* ============================================================
+ * 4. 畫面元素
+ * ============================================================ */
+const $ = id => document.getElementById(id);
+const video=$("video"), guide=$("guide"), banner=$("banner"), raw=$("raw"), sheet=$("sheet");
+/** 依名單狀態更新開始畫面：沒有名單時引導匯入，有名單時顯示「開始掃描」 */
+function refreshStart(){
+  const has = PLATES.length > 0;
+  $("stPeople").textContent = ROSTER.length; $("stPlates").textContent = PLATES.length; $("arrT").textContent = PLATES.length;
+  $("heroTitle").textContent = has ? "名單已就緒" : "先匯入名單";
+  $("heroLead").textContent = has ? "鏡頭對著來車，車牌在框內就會自動辨識，比對到名單會跳出車牌和名單內容。"
+                                  : "貼上或選擇一份車牌名單，就能開始用鏡頭比對。";
+  $("startBtn").querySelector("span").textContent = has ? "開始掃描" : "匯入名單";
+  $("startAlt").hidden = !has;
+  if (typeof updateArrived==="function") updateArrived();
+}
+/** 更新已到車輛數（依本機掃描紀錄中、名單內的不重複車牌計算） */
+function updateArrived(){
+  const n = new Set(log.filter(l=>l.inList).map(l=>norm(l.plate))).size;
+  $("arrN").textContent = n; $("stArrived").textContent = n;
+}
+updateArrived();
+
+const owners = p => p.owners.map(o=>o.info).join("、");
+
+/** 更新頂部橫幅與取景框顏色 */
+function show(kind, big, small, plate){
+  banner.className = kind ? "sign " + kind : ""; guide.className = kind||"";
+  banner.innerHTML = (plate ? `<span class="tw-plate">${esc(plate)}</span>` : "") +
+    `<div class="txt"><div class="big">${big}</div>${small ? `<div class="small">${small}</div>` : ""}</div>`;
+}
+
+/* 提醒設定：震動、音效可分別開關，存在本機 */
+const ALERT_KEY = "plate-alert-v1";
+let alertCfg = {vibrate:true, sound:true, voice:true, notInList:true};   // notInList：不在名單的車是否也要提醒
+try { alertCfg = Object.assign(alertCfg, JSON.parse(localStorage.getItem(ALERT_KEY)||"{}")); } catch(e){}
+const saveAlert = () => { try{ localStorage.setItem(ALERT_KEY, JSON.stringify(alertCfg)); }catch(e){} };
+
+/**
+ * 唸出車牌（Web Speech API，使用手機內建的中文語音）
+ *   英文字母逐字唸、數字用中文唸，例如 BTF-8283 →「B T F 八 二 八 三，名單內」
+ */
+const DIGIT = "零一二三四五六七八九";
+function speakPlate(plate, verdict){
+  if (!alertCfg.voice || !("speechSynthesis" in window)) return;
+  try{
+    const said = norm(plate).split("").map(c => /\d/.test(c) ? DIGIT[+c] : c).join(" ");
+    const u = new SpeechSynthesisUtterance(`${said}，${verdict}`);
+    u.lang = "zh-TW"; u.rate = 1.05;
+    const v = speechSynthesis.getVoices().find(v => /zh[-_]TW/i.test(v.lang)) || speechSynthesis.getVoices().find(v => /^zh/i.test(v.lang));
+    if (v) u.voice = v;
+    speechSynthesis.cancel();                 // 打斷上一句，避免排隊唸
+    speechSynthesis.speak(u);
+  }catch(e){ console.warn("speech", e); }
+}
+/** 在使用者點擊時先唸一句空白，解鎖瀏覽器的語音功能 */
+function unlockSpeech(){ try{ if ("speechSynthesis" in window){ speechSynthesis.getVoices(); speechSynthesis.speak(new SpeechSynthesisUtterance(" ")); } }catch(e){} }
+
+/* 提示音與震動：符合＝高音短嗶＋短震；不符合＝低音兩聲＋兩下震動（依設定開關） */
+let actx=null;
+function beep(ok){
+  if (alertCfg.vibrate) try{ navigator.vibrate && navigator.vibrate(ok?150:[80,60,80]); }catch(e){}
+  if (!alertCfg.sound) return;
+  try{
+    actx = actx || new (window.AudioContext||window.webkitAudioContext)();
+    const tones = ok ? [[1200,0]] : [[330,0],[330,.18]];
+    for (const [f,t0] of tones){
+      const o=actx.createOscillator(), g=actx.createGain();
+      o.frequency.value=f; o.connect(g); g.connect(actx.destination);
+      g.gain.setValueAtTime(.25, actx.currentTime+t0);
+      g.gain.exponentialRampToValueAtTime(.001, actx.currentTime+t0+.15);
+      o.start(actx.currentTime+t0); o.stop(actx.currentTime+t0+.16);
+    }
+  }catch(e){}
+}
+
+/* ============================================================
+ * 5. 相機
+ * ============================================================ */
+let track=null, paused=false, lastZoom=0, camOn=false;
+
+/** 關閉相機：停止所有影像軌道，鏡頭與感光元件真正斷電（狀態列的相機圖示會消失） */
+function stopCamera(){
+  const st = video.srcObject;
+  if (st) st.getTracks().forEach(t => t.stop());
+  video.srcObject = null; track = null; camOn = false;
+}
+
+async function startCamera(){
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia)
+    throw new Error("此瀏覽器不支援相機，或網頁不是用 https 開啟。");
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio:false,
+    video:{facingMode:{ideal:"environment"}, width:{ideal:1920}, height:{ideal:1080}}
+  });
+  video.srcObject = stream; await video.play(); camOn = true;
+  track = stream.getVideoTracks()[0];
+  const cap = track.getCapabilities ? track.getCapabilities() : {};
+  // 連續對焦（支援的手機才有）
+  if (cap.focusMode && cap.focusMode.includes("continuous"))
+    track.applyConstraints({advanced:[{focusMode:"continuous"}]}).catch(()=>{});
+  // 光學／數位變焦滑桿
+  if (cap.zoom){
+    const z=$("zoom"); z.min=cap.zoom.min; z.max=Math.min(cap.zoom.max,8); z.step=cap.zoom.step||0.1;
+    z.value = lastZoom || cap.zoom.min;                     // 暫停後重開相機，沿用原本的變焦倍率
+    if (lastZoom) track.applyConstraints({advanced:[{zoom:lastZoom}]}).catch(()=>{});
+    $("zoomRow").style.display="flex"; $("zoomVal").textContent=`${(+z.value).toFixed(1)}x`;
+    z.oninput=()=>{ lastZoom=+z.value; track.applyConstraints({advanced:[{zoom:+z.value}]}).catch(()=>{}); $("zoomVal").textContent=`${(+z.value).toFixed(1)}x`; };
+  }
+}
+
+/* ============================================================
+ * 6. 車牌辨識引擎（兩階段，皆為專門訓練的車牌模型）
+ *    (1) 偵測：YOLOv9-t 車牌偵測模型（輸入 384×384），找出畫面中所有車牌位置
+ *    (2) 辨識：先用 CCT-XS 快速 OCR（約快 5 倍）；未確定符合名單時才改用 CCT-S 精準 OCR 重讀
+ *    (3) 追蹤：上一張已找到車牌時，下一張直接沿用位置只做 OCR，跳過最耗時的偵測
+ *    模型來源：open-image-models / fast-plate-ocr（MIT 授權）
+ * ============================================================ */
+const DET_SIZE = 384;
+const OCR_W = 128, OCR_H = 64;
+const ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_";   // "_" 為補位字元
+let det = null, ocr = null, ocrFast = null;
+
+/** 載入兩個 ONNX 模型；有跨來源隔離（serve.py 提供）時啟用多執行緒加速 */
+async function initModels(){
+  ort.env.wasm.wasmPaths = new URL("lib/", location.href).href;   // 必須是完整網址
+  ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency||2) : 1;
+  const opt = {executionProviders:["wasm"], graphOptimizationLevel:"all"};
+  [det, ocrFast, ocr] = await Promise.all([
+    ort.InferenceSession.create("models/yolo-v9-t-384-license-plates-end2end.onnx", opt),
+    ort.InferenceSession.create("models/cct_xs_v2_global.onnx", opt),   // 快速
+    ort.InferenceSession.create("models/cct_s_v2_global.onnx", opt),    // 精準
+  ]);
+}
+
+/* 重複使用的 canvas：src＝辨識區原始影像、lb＝偵測用 letterbox、oc＝OCR 輸入 */
+const src = document.createElement("canvas"), lb = document.createElement("canvas"), oc = document.createElement("canvas");
+lb.width = lb.height = DET_SIZE; oc.width = OCR_W; oc.height = OCR_H;
+const sctx = src.getContext("2d",{willReadFrequently:true});
+const lctx = lb.getContext("2d",{willReadFrequently:true});
+const octx = oc.getContext("2d",{willReadFrequently:true});
+
+/** 擷取辨識區影像到 src（video 以 object-fit:cover 顯示，螢幕座標需換算回影像座標） */
+function grabGuide(){
+  const vw=video.videoWidth, vh=video.videoHeight;
+  if (!vw) return false;
+  const vr=video.getBoundingClientRect(), gr=guide.getBoundingClientRect();
+  const scale=Math.max(vr.width/vw, vr.height/vh);
+  const offX=(vw*scale-vr.width)/2, offY=(vh*scale-vr.height)/2;
+  const sx=Math.max(0,(gr.left-vr.left+offX)/scale), sy=Math.max(0,(gr.top-vr.top+offY)/scale);
+  const sw=Math.min(gr.width/scale,vw-sx), sh=Math.min(gr.height/scale,vh-sy);
+  src.width=Math.round(sw); src.height=Math.round(sh);
+  sctx.drawImage(video, sx,sy,sw,sh, 0,0,src.width,src.height);
+  return true;
+}
+
+/** 偵測：letterbox 到 384×384（灰色 114 補邊）→ RGB/255 → CHW 張量 → 回傳車牌框（src 座標） */
+async function detectPlates(){
+  const W=src.width, H=src.height, r=Math.min(DET_SIZE/W, DET_SIZE/H);
+  const nw=Math.round(W*r), nh=Math.round(H*r), dw=(DET_SIZE-nw)/2, dh=(DET_SIZE-nh)/2;
+  lctx.fillStyle="rgb(114,114,114)"; lctx.fillRect(0,0,DET_SIZE,DET_SIZE);
+  lctx.drawImage(src, 0,0,W,H, Math.round(dw-0.1), Math.round(dh-0.1), nw, nh);
+  const px=lctx.getImageData(0,0,DET_SIZE,DET_SIZE).data, N=DET_SIZE*DET_SIZE, t=new Float32Array(3*N);
+  for(let i=0;i<N;i++){ t[i]=px[i*4]/255; t[N+i]=px[i*4+1]/255; t[2*N+i]=px[i*4+2]/255; }
+  const out = await det.run({images:new ort.Tensor("float32", t, [1,3,DET_SIZE,DET_SIZE])});
+  const o=out[det.outputNames[0]], d=o.data, rows=o.dims[0], boxes=[];
+  for(let k=0;k<rows;k++){
+    const score=d[k*7+6]; if (score<0.3) continue;
+    boxes.push({x1:Math.max(0,(d[k*7+1]-dw)/r), y1:Math.max(0,(d[k*7+2]-dh)/r),
+                x2:Math.min(W,(d[k*7+3]-dw)/r), y2:Math.min(H,(d[k*7+4]-dh)/r), score});
+  }
+  return boxes.sort((a,b)=>b.score-a.score).slice(0,3);
+}
+
+/** 辨識：把每個車牌框縮放到 128×64 RGB（uint8, NHWC），一次批次送入 OCR 模型 */
+async function readPlates(boxes, model){
+  model = model || ocr;
+  if (!boxes.length) return [];
+  const n=boxes.length, buf=new Uint8Array(n*OCR_H*OCR_W*3);
+  boxes.forEach((b,k)=>{
+    octx.drawImage(src, b.x1,b.y1, Math.max(1,b.x2-b.x1), Math.max(1,b.y2-b.y1), 0,0,OCR_W,OCR_H);
+    const p=octx.getImageData(0,0,OCR_W,OCR_H).data, off=k*OCR_H*OCR_W*3;
+    for(let i=0,j=0;i<p.length;i+=4,j+=3){ buf[off+j]=p[i]; buf[off+j+1]=p[i+1]; buf[off+j+2]=p[i+2]; }
+  });
+  const out = await model.run({[model.inputNames[0]]: new ort.Tensor("uint8", buf, [n,OCR_H,OCR_W,3])});
+  const pl = out.plate || out[model.outputNames[0]], S=pl.dims[1], C=pl.dims[2], d=pl.data;
+  return boxes.map((b,k)=>{
+    let text="", confs=[];
+    for(let s=0;s<S;s++){                          // 每個字元位置取機率最高的字
+      let bi=0, bv=-1; const base=(k*S+s)*C;
+      for(let c=0;c<C;c++) if(d[base+c]>bv){bv=d[base+c];bi=c;}
+      if (ALPHABET[bi]!=="_"){ text+=ALPHABET[bi]; confs.push(bv); }
+    }
+    const conf = confs.length ? confs.reduce((a,b)=>a+b,0)/confs.length : 0;
+    return {text, conf, box:b};
+  });
+}
+
+/**
+ * 一次完整辨識：
+ *  1. 若正在追蹤（上一張有讀到車牌、且距上次完整偵測 < 6 張），直接沿用上次的車牌框，跳過偵測
+ *  2. 否則執行車牌偵測
+ *  3. 先用快速 OCR；結果不是「完全符合名單且信心 ≥ 0.9」時，再用精準 OCR 重讀，取信心較高者
+ *  4. 讀不到或信心太低 → 取消追蹤，下一張重新偵測
+ */
+let plateTrack = null, trackAge = 0;
+async function recognize(){
+  let boxes;
+  if (plateTrack && trackAge < 6){ boxes = plateTrack; trackAge++; }
+  else { boxes = await detectPlates(); trackAge = 0; }
+  let results = await readPlates(boxes, ocrFast);
+  // 快速 OCR 結果只有在「逐字完全符合名單、且信心 ≥ 0.9」時直接採用；其餘一律用精準 OCR 重讀
+  const weak = results.map((r,i)=>{ const h=findInList(r.text); return (h && h.exact && r.conf>=0.9) ? -1 : i; }).filter(i=>i>=0);
+  if (weak.length){
+    const again = await readPlates(weak.map(i=>boxes[i]), ocr);
+    weak.forEach((i,k)=>{ if (again[k].conf >= results[i].conf) results[i] = again[k]; });
+  }
+  results = results.filter(r=>r.text.length>=4 && r.conf>=0.4);
+  plateTrack = results.length ? results.map(r=>r.box) : null;      // 有讀到才繼續追蹤
+  return results;
+}
+
+/* 偵測框疊圖：在畫面上框出找到的車牌 */
+const ov = document.getElementById("ov"), ovx = ov.getContext("2d");
+function drawBoxes(results){
+  const gr=guide.getBoundingClientRect();
+  Object.assign(ov.style,{left:gr.left+"px", top:gr.top+"px", width:gr.width+"px", height:gr.height+"px"});
+  ov.width=gr.width*devicePixelRatio; ov.height=gr.height*devicePixelRatio;
+  ovx.clearRect(0,0,ov.width,ov.height);
+  if (!src.width) return;
+  const k=ov.width/src.width;
+  ovx.lineWidth=3*devicePixelRatio; ovx.font=`bold ${16*devicePixelRatio}px monospace`;
+  for (const r of results){
+    const inList = !!findInList(r.text);
+    ovx.strokeStyle = ovx.fillStyle = inList ? "#3fcf8e" : "#e9a23b";
+    ovx.strokeRect(r.box.x1*k, r.box.y1*k, (r.box.x2-r.box.x1)*k, (r.box.y2-r.box.y1)*k);
+    ovx.fillText(r.text, r.box.x1*k, Math.max(16*devicePixelRatio, r.box.y1*k-6));
+  }
+}
+
+/* ============================================================
+ * 7. 辨識迴圈 + 判定
+ *    - 名單車牌且逐字完全相同、平均信心 ≥ 0.85：單幀即判定
+ *    - 其餘（容錯或差一字）：需 2–3 幀一致
+ *    - 不在名單：同一個讀值、信心 ≥ 0.8，連續 2 幀
+ * ============================================================ */
+let hist=[], holdUntil=0, lastFinal="", fps="";
+/* 省電模式：
+ *   全速：最近 5 秒內偵測到車牌 → 每次處理完立刻處理下一張
+ *   省電：5 秒～60 秒沒看到車牌 → 每 0.8 秒處理一張
+ *   待機：超過 60 秒沒看到車牌 → 每 1.5 秒處理一張
+ *   網頁不在前景或卡片顯示中 → 完全不處理 */
+let lastSeen = 0;
+function nextDelay(){
+  const idle = Date.now() - lastSeen;
+  return idle < 5000 ? 0 : idle < 60000 ? 800 : 1500;
+}
+/** 左上角模式燈：全速（綠點閃爍）／省電、待機（黃點）／暫停（灰點） */
+function setMode(label){
+  const pill = document.getElementById("modePill");
+  document.getElementById("modeTxt").textContent = label === "全速" ? "掃描中" : label;
+  pill.className = "tag " + (label === "全速" ? "" : label === "已暫停" ? "off" : "slow");
+}
+function modeLabel(){
+  const idle = Date.now() - lastSeen;
+  return idle < 5000 ? "全速" : idle < 60000 ? "省電" : "待機";
+}
+async function loop(){
+  if (!paused && camOn && !modalOpen && !sheet.classList.contains("open") && !document.hidden && det && video.readyState>=2 && grabGuide()){   // 抽屜開著時不辨識，避免卡片蓋住手動輸入
+    try{
+      const t0=performance.now();
+      const results = await recognize();
+      fps = `${Math.round(performance.now()-t0)} ms`;
+      if (results.length) lastSeen = Date.now();      // 看到車牌 → 切回全速
+      drawBoxes(results);
+      raw.textContent = results.length
+        ? `${results.map(r=>`${r.text} ${Math.round(r.conf*100)}%`).join("　")} · ${fps}`
+        : `未偵測到車牌 · ${fps}`;
+      setMode(modeLabel());
+      judge(results);
+    }catch(e){ console.warn(e); raw.textContent = "辨識錯誤：" + (e.message||e); }
+  }
+  setTimeout(loop, nextDelay());
+}
+
+function judge(results){
+  // 取本幀最佳結果：優先名單內（完全相同 > 容錯 > 差一字），其次信心最高的讀值
+  let best=null;
+  for (const r of results){
+    const h=findInList(r.text);
+    const rank = h ? (h.exact?3:h.dist===0?2:1) : 0;
+    if (!best || rank>best.rank || (rank===best.rank && r.conf>best.r.conf)) best={r,h,rank};
+  }
+  hist.push(best ? {key:best.h?best.h.plate.key:null, read:norm(best.r.text), conf:best.r.conf} : {key:null,read:null,conf:0});
+  if (hist.length>4) hist.shift();
+  const now=Date.now();
+
+  if (best && best.h){
+    const h=best.h, same=hist.filter(x=>x.key===h.plate.key).length;
+    const need = (h.exact && best.r.conf>=0.85) ? 1 : (h.dist===0 ? 2 : 3);
+    if (same>=need){
+      const k="ok:"+h.plate.key;
+      if (lastFinal!==k){ beep(true); speakPlate(h.plate.plate, h.dist===0 ? "名單內" : "疑似名單車牌，請確認"); lastFinal=k; addLog(h.plate.plate, true); }
+      const note = h.exact ? "" : h.dist===0 ? "<br>（易混字元已自動容錯，請目視確認）" : "<br>辨識差一字，請目視確認";
+      showMatch(h.plate, h.dist===0 ? "ok" : "warn", note.replace("<br>",""));
+      show(h.dist===0?"ok":"warn", h.dist===0?"名單內":"疑似名單車牌",
+        h.exact ? "" : h.dist===0 ? "易混字元已自動容錯，請目視確認" : "差一個字，請目視確認", h.plate.plate);
+      holdUntil=now+2500; return;
+    }
+  } else if (best && best.r.conf>=0.8 && best.r.text.length>=5){
+    const rd=norm(best.r.text), same=hist.filter(x=>x.read===rd && !x.key && x.conf>=0.8).length;
+    if (same>=2){
+      const k="bad:"+rd;
+      if (lastFinal!==k){
+        // 「不在名單也提醒」關閉時：只顯示紅色結果，不震動、不出聲、不唸車牌
+        if (alertCfg.notInList){ beep(false); speakPlate(best.r.text, "不在名單"); }
+        lastFinal=k; addLog(best.r.text,false);
+      }
+      show("bad", "不在名單", "讀錯時可以靠近一點，或改用手動輸入", best.r.text);
+      holdUntil=now+2500; return;
+    }
+  }
+  if (now>holdUntil){ lastFinal=""; show("", "對準車牌", "車牌出現在框內就會自動辨識"); setMode("全速"); }
+}
+
+/* ============================================================
+ * 7a. 螢幕常亮：使用 Wake Lock API，網頁顯示期間螢幕不自動關閉
+ *     切到其他 App 時系統會自動釋放，回到網頁時重新取得
+ * ============================================================ */
+let wakeLock = null;
+async function keepAwake(){
+  try{
+    if (!("wakeLock" in navigator) || document.hidden) return;
+    wakeLock = await navigator.wakeLock.request("screen");
+  }catch(e){ console.warn("wakeLock", e); }
+}
+document.addEventListener("visibilitychange", async () => {
+  if (document.hidden){ if (camOn) stopCamera(); return; }   // 離開畫面：關相機省電
+  if (paused || !det) return;                                // 使用者暫停中 → 維持關閉
+  try { if (!camOn) await startCamera(); keepAwake(); lastSeen=Date.now(); plateTrack=null; } catch(e){ console.warn(e); }
+});
+
+/* ============================================================
+ * 7b. 比對成功大卡片
+ *     - 只顯示車牌與電話號碼（純文字，不提供撥號）
+ *     - 卡片顯示期間暫停辨識；只有按「繼續掃描」才會關閉（不自動關閉、點背景也不關閉）
+ *     - 同一車牌 30 秒內不重複跳出
+ * ============================================================ */
+const matchEl = document.getElementById("match");
+let modalOpen = false, modalTimer = null, lastPopped = {};
+function showMatch(plate, kind, note){
+  const now = Date.now();
+  if (lastPopped[plate.key] && now - lastPopped[plate.key] < 30000) return;   // 冷卻時間
+  lastPopped[plate.key] = now;
+  const head = document.getElementById("mhead");
+  document.getElementById("mcard").className = kind;
+  head.innerHTML = (kind==="ok" ? "名單內" : "疑似名單車牌，請目視確認") + (note ? `<small>${note}</small>` : "");
+  document.getElementById("mplate").textContent = plate.plate;
+  // 顯示名單內容：純數字（電話、車位號）用大號窄體字，其他文字用一般字體並自動換行
+  document.getElementById("mowners").innerHTML = plate.owners.map(o => `
+    <div class="mowner"><span class="${/^[\d\-+() ]+$/.test(o.info) ? "mphone" : "mtext"}">${esc(o.info)}</span></div>`).join("");
+  matchEl.classList.add("show"); modalOpen = true;
+  // 不自動關閉：卡片一直顯示，直到按下「繼續掃描」（方便抄寫）
+  clearInterval(modalTimer);
+  document.getElementById("mclose").textContent = "繼續掃描";
+}
+function closeMatch(){
+  clearInterval(modalTimer); matchEl.classList.remove("show"); modalOpen = false;
+  hist = []; lastFinal = ""; holdUntil = 0;
+}
+document.getElementById("mclose").onclick = closeMatch;
+
+
+/* ============================================================
+ * 8. 抽屜：手動輸入 / 掃描紀錄 / 完整名單
+ * ============================================================ */
+let curTab="manual";
+function personHTML(p){
+  return `<div class="item" onclick="lastPopped={};showMatch(PLATES.find(x=>x.key==='${p.key}'),'ok','')">
+    <span class="tw-plate">${esc(p.plate)}</span>
+    <div class="who">${p.owners.map(o=>esc(o.info)).join("<br>")}</div>
+    ${seenPill(p.key)}</div>`;
+}
+function seenPill(key){
+  const e = log.find(l=>l.inList && norm(l.plate)===key);
+  return e ? `<span class="state ok">${new Date(e.t).toLocaleTimeString("zh-TW",{hour:"2-digit",minute:"2-digit",hour12:false})} 到</span>`
+           : `<span class="state wait">未到</span>`;
+}
+function manualResult(v){
+  const q=norm(v), out=$("mres");
+  if (q.length<3){ out.innerHTML=""; return; }
+  const L=loose(q);
+  const hits = PLATES.filter(p=>p.key.includes(q)||p.loose.includes(L));
+  if (hits.length) out.innerHTML = `<div class="res ok">找到 ${hits.length} 筆，點一下可放大顯示</div>` + hits.map(personHTML).join("");
+  else {
+    const near = findInList(q);
+    out.innerHTML = near ? `<div class="res warn">沒有完全相同的車牌，最接近的是：</div>${personHTML(near.plate)}`
+                         : `<div class="res bad">不在名單中</div>`;
+  }
+}
+function renderSheet(){
+  const b=$("sheetBody");
+  document.querySelectorAll("#sheetHead [data-tab]").forEach(x=>x.classList.toggle("sel",x.dataset.tab===curTab));
+  if (curTab==="manual"){
+    b.innerHTML=`<input id="manual" placeholder="輸入車牌號碼，例如 8283" autocomplete="off" autocapitalize="characters">
+      <div class="hint" style="margin-top:8px">可輸入部分號碼（3 碼以上），「-」可省略。</div><div id="mres"></div>`;
+    const m=$("manual"); m.oninput=()=>manualResult(m.value); m.focus();
+  } else if (curTab==="log"){
+    const nIn = new Set(log.filter(l=>l.inList).map(l=>norm(l.plate))).size;
+    b.innerHTML = `<div class="row"><div class="kpi"><span class="num">${nIn}</span>/ ${PLATES.length} 輛已到</div>
+      <button id="clr" class="mini">清除紀錄</button></div>` +
+      (log.length ? log.map(l=>`<div class="item"><span class="tw-plate">${esc(l.plate)}</span>
+        <div class="who"><span class="state ${l.inList?"ok":"bad"}">${l.inList?"名單內":"不在名單"}</span></div>
+        <span class="num" style="font-size:17px;color:var(--muted)">${new Date(l.t).toLocaleTimeString("zh-TW",{hour:"2-digit",minute:"2-digit",hour12:false})}</span></div>`).join("")
+        : `<div class="hint" style="margin-top:14px;text-align:center">尚無紀錄</div>`);
+    let armed=false;
+    $("clr").onclick=e=>{ if(!armed){armed=true;e.target.textContent="再按一次確認";return;} log=[];saveLog();updateArrived();renderSheet(); };
+  } else if (curTab==="sync"){
+    b.innerHTML = `
+      <div class="group">
+        <h3>名單</h3>
+        <div class="hint">目前 ${ROSTER.length} 筆、${PLATES.length} 組車牌。從試算表選取儲存格複製後貼在下面，或選擇 CSV 檔。每列要有車牌，其他欄位會在比對到時顯示。</div>
+        <div class="field"><textarea id="impText" placeholder="ABC-1234	0912-345-678&#10;XYZ-5678	王小明 B2-15 車位"></textarea></div>
+        <div class="btnrow">
+          <button id="impGo" class="btn primary">匯入並取代名單</button>
+          <button id="impFile" class="btn ghost">選擇 CSV 檔</button>
+        </div>
+        <input id="impPick" type="file" accept=".csv,.tsv,.txt,text/csv,text/plain" hidden>
+        <div class="btnrow">
+          <button id="impSheet" class="btn ghost">從 Google 試算表載入</button>
+          <button id="wipe" class="btn ghost" style="color:#ff6b73">清除名單和紀錄</button>
+        </div>
+        <div id="impMsg" class="hint" style="margin-top:10px"></div>
+      </div>
+      <div class="group">
+        <h3>比對時的提醒</h3>
+        <label class="sw"><span>震動<small>名單內震一下，不在名單震兩下</small></span><input type="checkbox" id="optVib"></label>
+        <label class="sw"><span>音效<small>名單內高音一聲，不在名單低音兩聲</small></span><input type="checkbox" id="optSnd"></label>
+        <label class="sw"><span>唸出車牌<small>用中文語音唸出車牌和結果</small></span><input type="checkbox" id="optVoice"></label>
+        <label class="sw"><span>不在名單也提醒<small>關閉後，不在名單的車只顯示紅色，不震動也不出聲</small></span><input type="checkbox" id="optNot"></label>
+      </div>
+      <div class="group">
+      <h3>Google 試算表同步</h3>
+      <div class="hint">選用。照說明把 Apps Script 部署到自己的試算表後，貼上網址和你設定的密碼，掃描結果會自動寫入，也能從試算表載入名單。</div>
+      <div class="field"><label>網頁應用程式網址</label><input id="sUrl" placeholder="https://script.google.com/macros/s/.../exec"></div>
+      <div class="field"><label>存取密碼（需與 Apps Script 內的 TOKEN 相同）</label><input id="sTok"></div>
+      <div class="field"><label>裝置名稱（多支手機時用來區分）</label><input id="sDev"></div>
+      <div class="btnrow">
+        <button id="sSave" class="btn primary">儲存並測試</button>
+        <button id="sRetry" class="btn ghost">立即重傳（${queue.length}）</button>
+      </div>
+      <div id="sMsg" class="hint" style="margin-top:12px"></div>
+      </div>
+      <div class="group">
+        <h3>使用須知</h3>
+        <div class="lic">車牌和名單內容屬於個人資料。請只匯入你有權使用的名單，用完後按「清除名單和紀錄」。名單、紀錄和設定只存在這支手機的瀏覽器；只有在你設定 Google 試算表同步後，掃描結果才會送到你自己的試算表。辨識結果可能有誤，重要用途請目視確認車牌。</div>
+      </div>
+      <div class="group">
+        <h3>開放原始碼授權</h3>
+        <div class="lic">車牌偵測模型：open-image-models（MIT，© ankandrew），以 YOLOv9 架構訓練<br>
+        車牌文字辨識模型：fast-plate-ocr（MIT，© ankandrew）<br>
+        推論引擎：ONNX Runtime Web（MIT，© Microsoft）<br>
+        字型：Barlow Condensed（SIL OFL 1.1）<br>
+        完整條款見 <a href="licenses/NOTICE.txt" target="_blank" rel="noopener">licenses/NOTICE.txt</a></div>
+      </div>`;
+    // ---- 名單匯入 ----
+    const doImport = text => {
+      const {rows, skipped} = parseRoster(text);
+      if (!rows.length){ $("impMsg").textContent = "找不到車牌。請確認每列都有像 ABC-1234 這樣的車牌。"; return; }
+      setRoster(rows);
+      $("impMsg").textContent = `已匯入 ${rows.length} 筆、${PLATES.length} 組車牌` + (skipped ? `，跳過 ${skipped} 列沒有車牌的資料` : "") + "。";
+      $("impText").value = "";
+    };
+    $("impGo").onclick = () => doImport($("impText").value);
+    $("impFile").onclick = () => $("impPick").click();
+    $("impPick").onchange = async e => { const f = e.target.files[0]; if (f) doImport(await f.text()); e.target.value = ""; };
+    $("impSheet").onclick = async () => {
+      if (!syncCfg.url){ $("impMsg").textContent = "請先在下方「Google 試算表同步」填好網址和密碼並儲存。"; return; }
+      $("impMsg").textContent = "載入中…";
+      try {
+        const j = await (await fetch(syncCfg.url + "?action=roster&token=" + encodeURIComponent(syncCfg.token))).json();
+        if (!j.ok) throw new Error(j.error || "試算表拒絕");
+        doImport((j.rows||[]).map(r => r.join("\t")).join("\n"));
+      } catch(e) { $("impMsg").textContent = "載入失敗：" + (e.message||e); }
+    };
+    let wipeArmed = false;
+    $("wipe").onclick = e => {
+      if (!wipeArmed){ wipeArmed = true; e.target.textContent = "再按一次確認清除"; setTimeout(()=>{wipeArmed=false; if (e.target.isConnected) e.target.textContent="清除名單和紀錄";}, 4000); return; }
+      log = []; saveLog(); queue = []; saveQueue(); lastPopped = {}; setRoster([]); updateSyncState(); renderSheet();
+    };
+    $("optVib").checked = alertCfg.vibrate; $("optSnd").checked = alertCfg.sound; $("optVoice").checked = alertCfg.voice; $("optNot").checked = alertCfg.notInList;
+    $("optNot").onchange = e => { alertCfg.notInList = e.target.checked; saveAlert(); };
+    $("optVoice").onchange = e => { alertCfg.voice = e.target.checked; saveAlert(); if (alertCfg.voice) speakPlate("ABC-1234", "語音已開啟"); };
+    $("optVib").onchange = e => { alertCfg.vibrate = e.target.checked; saveAlert(); if (alertCfg.vibrate) try{navigator.vibrate&&navigator.vibrate(120);}catch(_){} };
+    $("optSnd").onchange = e => { alertCfg.sound = e.target.checked; saveAlert(); if (alertCfg.sound) { const v=alertCfg.vibrate; alertCfg.vibrate=false; beep(true); alertCfg.vibrate=v; } };
+    $("sUrl").value=syncCfg.url; $("sTok").value=syncCfg.token; $("sDev").value=syncCfg.device;
+    $("sSave").onclick = async () => {
+      syncCfg = {url:$("sUrl").value.trim(), token:$("sTok").value.trim(), device:$("sDev").value.trim()||"手機"};
+      saveCfg(); $("sMsg").textContent = "測試連線中…";
+      try {
+        const j = await (await fetch(syncCfg.url)).json();
+        $("sMsg").textContent = j.ok ? "連線成功：" + (j.msg||"") : "連線有回應，但出現錯誤：" + (j.error||"回應異常");
+        flushSync();
+      } catch(e) { $("sMsg").textContent = "連不到試算表：" + (e.message||e) + "。請確認網址和手機網路。"; }
+    };
+    $("sRetry").onclick = () => { lastSyncMsg=""; flushSync(); setTimeout(renderSheet, 1500); };
+  } else {
+    b.innerHTML = PLATES.length ? PLATES.map(personHTML).join("")
+      : `<div class="hint" style="text-align:center;margin-top:20px">還沒有名單。到「設定」匯入。</div>`;
+  }
+}
+updateSyncState(); flushSync();
+/** 開啟抽屜並切到指定分頁 */
+function openSheet(tab){ if (tab) curTab = tab; sheet.classList.add("open"); $("scrim").classList.add("show"); renderSheet(); }
+function closeSheet(){ sheet.classList.remove("open"); $("scrim").classList.remove("show"); }
+$("manualBtn").onclick = () => openSheet("manual");
+$("listBtn").onclick   = () => openSheet(curTab==="manual" ? "list" : curTab);
+$("syncChip").onclick  = () => openSheet("sync");
+$("arrivedChip").onclick = () => openSheet("list");
+$("closeSheet").onclick = closeSheet;
+$("scrim").onclick = closeSheet;
+document.querySelectorAll("#sheetHead [data-tab]").forEach(x=>x.onclick=()=>{curTab=x.dataset.tab;renderSheet();});
+/** 暫停鍵外觀：暫停中顯示綠色「繼續」播放鍵 */
+function setPauseUI(p){
+  const btn = $("pauseBtn");
+  btn.classList.toggle("on", p); document.body.classList.toggle("paused", p);
+  btn.querySelector("use").setAttribute("href", p ? "#i-play" : "#i-pause");
+  btn.querySelector(".lbl").textContent = p ? "繼續" : "暫停"; btn.setAttribute("aria-label", p ? "繼續掃描" : "暫停");
+  if (p) setMode("已暫停");
+}
+$("pauseBtn").onclick=async e=>{
+  const btn=e.currentTarget;
+  paused=!paused; setPauseUI(paused);
+  if (paused){
+    stopCamera();                                        // 相機斷電
+    try{ if (wakeLock) { await wakeLock.release(); wakeLock=null; } }catch(_){}   // 允許螢幕自動關閉
+    drawBoxes([]);
+    show("", "已暫停，相機已關閉", "按中間的按鈕繼續掃描");
+  } else {
+    show("", "開啟相機中", "");
+    try { await startCamera(); keepAwake(); lastSeen=Date.now(); plateTrack=null; hist=[];
+          show("", "對準車牌", "車牌出現在框內就會自動辨識"); setMode("全速"); }
+    catch(err){ paused=true; setPauseUI(true);
+          show("bad","無法重新開啟相機", (err.message||err)); }
+  }
+};
+
+/* ============================================================
+ * 9. 啟動
+ * ============================================================ */
+$("startAlt").onclick = () => openSheet("sync");
+$("startBtn").onclick = async () => {
+  if (!PLATES.length){ openSheet("sync"); return; }     // 還沒有名單：先引導匯入
+  $("startErr").textContent="";
+  unlockSpeech();
+  $("startBtn").disabled = true; $("startBtn").querySelector("span").textContent = "開啟相機中…";
+  try{
+    beep && (actx = new (window.AudioContext||window.webkitAudioContext)());   // 在點擊中解鎖音效
+  }catch(e){}
+  try{
+    await startCamera();
+    keepAwake();                                   // 開始掃描後保持螢幕常亮
+    $("start").style.display="none";
+  }catch(e){
+    $("startErr").innerHTML = "無法開啟相機：" + (e.message||e) +
+      "<br>請確認已允許相機權限，且網頁是以 https 或 localhost 開啟。";
+    $("startBtn").disabled = false; $("startBtn").querySelector("span").textContent = "重試";
+    return;
+  }
+  try{
+    if (typeof ort==="undefined") throw new Error("辨識模組未載入，請確認 lib 資料夾完整");
+    await initModels();
+    show("", "對準車牌", "車牌出現在框內就會自動辨識"); setMode("全速");
+    loop();
+  }catch(e){
+    show("bad","辨識模組載入失敗", (e.message||e)+"。仍可用手動輸入查詢");
+  }
+};
+
+/* ============================================================
+ * 10. 離線支援（PWA）
+ *     Service Worker 會快取所有檔案（含模型），之後沒有網路也能開啟
+ *     並替回應補上跨來源隔離標頭，讓辨識可以用多執行緒（在一般靜態主機上也有效）
+ * ============================================================ */
+if ("serviceWorker" in navigator){
+  navigator.serviceWorker.register("sw.js").then(() => navigator.serviceWorker.ready).then(() => {
+    // 第一次安裝後重新載入一次，讓 Service Worker 接手並啟用多執行緒（只在還沒開始掃描時做）
+    if (!self.crossOriginIsolated && !sessionStorage.getItem("coi-reloaded") && $("start").style.display !== "none"){
+      sessionStorage.setItem("coi-reloaded", "1"); location.reload();
+    }
+  }).catch(e => console.warn("sw", e));
+}
+</script>
+</body>
+</html>

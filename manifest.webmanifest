@@ -1,0 +1,16 @@
+{
+  "name": "車牌名單比對",
+  "short_name": "車牌比對",
+  "description": "用手機鏡頭即時辨識車牌，比對自己匯入的名單。辨識在手機上進行。",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#16181b",
+  "theme_color": "#16181b",
+  "lang": "zh-Hant",
+  "icons": [
+    {"src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+    {"src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}
+  ]
+}
