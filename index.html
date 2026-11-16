@@ -195,6 +195,7 @@
   .group h3{font-size:15px;font-weight:700;margin:0 0 4px}
   .sw{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 0;border-bottom:1px solid var(--hair);font-size:16px}
   .sw small{display:block;font-size:13px;color:var(--muted);margin-top:2px}
+  .sw select{flex:none;font-size:16px;padding:8px 10px;border-radius:10px;border:1px solid var(--hair);background:var(--asphalt);color:var(--text)}
   .sw input{appearance:none;-webkit-appearance:none;flex:none;width:52px;height:30px;border-radius:30px;background:#4a4f55;position:relative;
     transition:background .15s;cursor:pointer;margin:0}
   .sw input::after{content:"";position:absolute;top:3px;left:3px;width:24px;height:24px;border-radius:50%;background:#fff;transition:left .15s}
@@ -513,8 +514,16 @@ function show(kind, big, small, plate){
 
 /* 提醒設定：震動、音效可分別開關，存在本機 */
 const ALERT_KEY = "plate-alert-v1";
-let alertCfg = {vibrate:true, sound:true, voice:true, notInList:true};   // notInList：不在名單的車是否也要提醒
-try { alertCfg = Object.assign(alertCfg, JSON.parse(localStorage.getItem(ALERT_KEY)||"{}")); } catch(e){}
+// voiceIn／voiceOut：名單內、不在名單各自是否唸出車牌；notInList：不在名單的車是否震動與發出音效
+// maxRepeat：同一車牌最多提醒幾次（0＝不限）
+let alertCfg = {vibrate:true, sound:true, voiceIn:true, voiceOut:true, notInList:true, maxRepeat:2};
+try {
+  const saved = JSON.parse(localStorage.getItem(ALERT_KEY)||"{}");
+  // 舊版只有一個 voice 開關：沿用到兩個新開關
+  if (saved.voice !== undefined && saved.voiceIn === undefined){ saved.voiceIn = saved.voice; saved.voiceOut = saved.voice; }
+  delete saved.voice;
+  alertCfg = Object.assign(alertCfg, saved);
+} catch(e){}
 const saveAlert = () => { try{ localStorage.setItem(ALERT_KEY, JSON.stringify(alertCfg)); }catch(e){} };
 
 /**
@@ -522,8 +531,8 @@ const saveAlert = () => { try{ localStorage.setItem(ALERT_KEY, JSON.stringify(al
  *   英文字母逐字唸、數字用中文唸，例如 BTF-8283 →「B T F 八 二 八 三，名單內」
  */
 const DIGIT = "零一二三四五六七八九";
-function speakPlate(plate, verdict){
-  if (!alertCfg.voice || !("speechSynthesis" in window)) return;
+function speakPlate(plate, verdict, enabled){
+  if (!enabled || !("speechSynthesis" in window)) return;
   try{
     const said = norm(plate).split("").map(c => /\d/.test(c) ? DIGIT[+c] : c).join(" ");
     const u = new SpeechSynthesisUtterance(`${said}，${verdict}`);
@@ -536,6 +545,26 @@ function speakPlate(plate, verdict){
 }
 /** 在使用者點擊時先唸一句空白，解鎖瀏覽器的語音功能 */
 function unlockSpeech(){ try{ if ("speechSynthesis" in window){ speechSynthesis.getVoices(); speechSynthesis.speak(new SpeechSynthesisUtterance(" ")); } }catch(e){} }
+
+/* ------------------------------------------------------------
+ * 重複辨識控制
+ *   同一車牌每次提醒後記一次；30 秒內再讀到視為同一次經過，不重複提醒也不計次
+ *   累計達到上限（預設 2 次）後，再讀到只顯示灰色「已辨識過」，不跳卡片、不震動、不出聲
+ *   清除紀錄時一併歸零
+ * ------------------------------------------------------------ */
+const SEEN_KEY = "plate-seen-v1", REPEAT_GAP = 30000;
+let seen = {};
+try { seen = JSON.parse(localStorage.getItem(SEEN_KEY)||"{}"); } catch(e){}
+const saveSeen = () => { try{ localStorage.setItem(SEEN_KEY, JSON.stringify(seen)); }catch(e){} };
+function resetSeen(){ seen = {}; saveSeen(); }
+/** 回傳 "alert"（要提醒）、"recent"（剛提醒過，安靜）、"done"（已達上限，安靜） */
+function alertState(key){
+  const s = seen[key] || {n:0, t:0}, now = Date.now();
+  if (now - s.t < REPEAT_GAP) return "recent";
+  if (alertCfg.maxRepeat && s.n >= alertCfg.maxRepeat) return "done";
+  seen[key] = {n:s.n+1, t:now}; saveSeen();
+  return "alert";
+}
 
 /* 提示音與震動：符合＝高音短嗶＋短震；不符合＝低音兩聲＋兩下震動（依設定開關） */
 let actx=null;
@@ -764,6 +793,7 @@ async function loop(){
   setTimeout(loop, nextDelay());
 }
 
+let finalState = "alert";     // 目前這次判定的提醒狀態（見 alertState）
 function judge(results){
   // 取本幀最佳結果：優先名單內（完全相同 > 容錯 > 差一字），其次信心最高的讀值
   let best=null;
@@ -781,9 +811,17 @@ function judge(results){
     const need = (h.exact && best.r.conf>=0.85) ? 1 : (h.dist===0 ? 2 : 3);
     if (same>=need){
       const k="ok:"+h.plate.key;
-      if (lastFinal!==k){ beep(true); speakPlate(h.plate.plate, h.dist===0 ? "名單內" : "疑似名單車牌，請確認"); lastFinal=k; addLog(h.plate.plate, true); }
-      const note = h.exact ? "" : h.dist===0 ? "<br>（易混字元已自動容錯，請目視確認）" : "<br>辨識差一字，請目視確認";
-      showMatch(h.plate, h.dist===0 ? "ok" : "warn", note.replace("<br>",""));
+      if (lastFinal!==k){
+        finalState = alertState(k);
+        if (finalState==="alert"){ beep(true); speakPlate(h.plate.plate, h.dist===0 ? "名單內" : "疑似名單車牌，請確認", alertCfg.voiceIn); }
+        lastFinal=k; addLog(h.plate.plate, true);
+      }
+      if (finalState==="done"){            // 已達提醒上限：安靜顯示，不跳卡片
+        show("", "已辨識過，名單內", `已提醒 ${seen[k].n} 次，不再提醒`, h.plate.plate);
+        holdUntil=now+2500; return;
+      }
+      const note = h.exact ? "" : h.dist===0 ? "易混字元已自動容錯，請目視確認" : "辨識差一字，請目視確認";
+      if (finalState==="alert") showMatch(h.plate, h.dist===0 ? "ok" : "warn", note);
       show(h.dist===0?"ok":"warn", h.dist===0?"名單內":"疑似名單車牌",
         h.exact ? "" : h.dist===0 ? "易混字元已自動容錯，請目視確認" : "差一個字，請目視確認", h.plate.plate);
       holdUntil=now+2500; return;
@@ -793,9 +831,16 @@ function judge(results){
     if (same>=2){
       const k="bad:"+rd;
       if (lastFinal!==k){
-        // 「不在名單也提醒」關閉時：只顯示紅色結果，不震動、不出聲、不唸車牌
-        if (alertCfg.notInList){ beep(false); speakPlate(best.r.text, "不在名單"); }
+        finalState = alertState(k);
+        if (finalState==="alert"){
+          if (alertCfg.notInList) beep(false);                                  // 震動與音效
+          speakPlate(best.r.text, "不在名單", alertCfg.voiceOut);               // 語音（獨立開關）
+        }
         lastFinal=k; addLog(best.r.text,false);
+      }
+      if (finalState==="done"){
+        show("", "已辨識過，不在名單", `已提醒 ${seen[k].n} 次，不再提醒`, best.r.text);
+        holdUntil=now+2500; return;
       }
       show("bad", "不在名單", "讀錯時可以靠近一點，或改用手動輸入", best.r.text);
       holdUntil=now+2500; return;
@@ -895,7 +940,7 @@ function renderSheet(){
         <span class="num" style="font-size:17px;color:var(--muted)">${new Date(l.t).toLocaleTimeString("zh-TW",{hour:"2-digit",minute:"2-digit",hour12:false})}</span></div>`).join("")
         : `<div class="hint" style="margin-top:14px;text-align:center">尚無紀錄</div>`);
     let armed=false;
-    $("clr").onclick=e=>{ if(!armed){armed=true;e.target.textContent="再按一次確認";return;} log=[];saveLog();updateArrived();renderSheet(); };
+    $("clr").onclick=e=>{ if(!armed){armed=true;e.target.textContent="再按一次確認";return;} log=[];saveLog();resetSeen();lastPopped={};updateArrived();renderSheet(); };
   } else if (curTab==="sync"){
     b.innerHTML = `
       <div class="group">
@@ -917,8 +962,11 @@ function renderSheet(){
         <h3>比對時的提醒</h3>
         <label class="sw"><span>震動<small>名單內震一下，不在名單震兩下</small></span><input type="checkbox" id="optVib"></label>
         <label class="sw"><span>音效<small>名單內高音一聲，不在名單低音兩聲</small></span><input type="checkbox" id="optSnd"></label>
-        <label class="sw"><span>唸出車牌<small>用中文語音唸出車牌和結果</small></span><input type="checkbox" id="optVoice"></label>
-        <label class="sw"><span>不在名單也提醒<small>關閉後，不在名單的車只顯示紅色，不震動也不出聲</small></span><input type="checkbox" id="optNot"></label>
+        <label class="sw"><span>名單內：唸出車牌<small>例如「B T F 八 二 八 三，名單內」</small></span><input type="checkbox" id="optVoiceIn"></label>
+        <label class="sw"><span>不在名單：唸出車牌<small>例如「A B C 一 二 三 四，不在名單」</small></span><input type="checkbox" id="optVoiceOut"></label>
+        <label class="sw"><span>不在名單：震動和音效<small>關閉後，不在名單的車不震動、不響</small></span><input type="checkbox" id="optNot"></label>
+        <label class="sw"><span>同一車牌最多提醒<small>達到次數後再掃到只顯示「已辨識過」。清除紀錄後重新計算</small></span>
+          <select id="optRepeat"><option value="1">1 次</option><option value="2">2 次</option><option value="3">3 次</option><option value="0">不限</option></select></label>
       </div>
       <div class="group">
       <h3>Google 試算表同步</h3>
@@ -967,11 +1015,14 @@ function renderSheet(){
     let wipeArmed = false;
     $("wipe").onclick = e => {
       if (!wipeArmed){ wipeArmed = true; e.target.textContent = "再按一次確認清除"; setTimeout(()=>{wipeArmed=false; if (e.target.isConnected) e.target.textContent="清除名單和紀錄";}, 4000); return; }
-      log = []; saveLog(); queue = []; saveQueue(); lastPopped = {}; setRoster([]); updateSyncState(); renderSheet();
+      log = []; saveLog(); resetSeen(); queue = []; saveQueue(); lastPopped = {}; setRoster([]); updateSyncState(); renderSheet();
     };
-    $("optVib").checked = alertCfg.vibrate; $("optSnd").checked = alertCfg.sound; $("optVoice").checked = alertCfg.voice; $("optNot").checked = alertCfg.notInList;
+    $("optVib").checked = alertCfg.vibrate; $("optSnd").checked = alertCfg.sound; $("optVoiceIn").checked = alertCfg.voiceIn; $("optVoiceOut").checked = alertCfg.voiceOut; $("optNot").checked = alertCfg.notInList;
+    $("optRepeat").value = String(alertCfg.maxRepeat);
+    $("optRepeat").onchange = e => { alertCfg.maxRepeat = +e.target.value; saveAlert(); };
     $("optNot").onchange = e => { alertCfg.notInList = e.target.checked; saveAlert(); };
-    $("optVoice").onchange = e => { alertCfg.voice = e.target.checked; saveAlert(); if (alertCfg.voice) speakPlate("ABC-1234", "語音已開啟"); };
+    $("optVoiceIn").onchange  = e => { alertCfg.voiceIn  = e.target.checked; saveAlert(); if (e.target.checked) speakPlate("ABC-1234", "名單內", true); };
+    $("optVoiceOut").onchange = e => { alertCfg.voiceOut = e.target.checked; saveAlert(); if (e.target.checked) speakPlate("ABC-1234", "不在名單", true); };
     $("optVib").onchange = e => { alertCfg.vibrate = e.target.checked; saveAlert(); if (alertCfg.vibrate) try{navigator.vibrate&&navigator.vibrate(120);}catch(_){} };
     $("optSnd").onchange = e => { alertCfg.sound = e.target.checked; saveAlert(); if (alertCfg.sound) { const v=alertCfg.vibrate; alertCfg.vibrate=false; beep(true); alertCfg.vibrate=v; } };
     $("sUrl").value=syncCfg.url; $("sTok").value=syncCfg.token; $("sDev").value=syncCfg.device;
@@ -1012,8 +1063,9 @@ XYZ-5678    王小明　B2-15 車位</span>
       </ul>
       <h3>提醒方式</h3>
       <ul>
-        <li>到「設定」可以分別開關震動、音效、唸出車牌。</li>
-        <li>關掉「不在名單也提醒」後，不在名單的車只顯示紅色，不震動也不出聲。</li>
+        <li>到「設定」可以分別開關震動、音效。</li>
+        <li>唸出車牌分成「名單內」和「不在名單」兩個開關，可以只開其中一個。</li>
+        <li>同一台車最多提醒 2 次，之後再掃到只顯示「已辨識過」，不會再跳卡片或出聲。次數可以在「設定」調整。</li>
       </ul>
       <h3>每天重新開始</h3>
       <ul>
