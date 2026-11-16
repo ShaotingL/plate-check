@@ -548,11 +548,11 @@ function unlockSpeech(){ try{ if ("speechSynthesis" in window){ speechSynthesis.
 
 /* ------------------------------------------------------------
  * 重複辨識控制
- *   同一車牌每次提醒後記一次；30 秒內再讀到視為同一次經過，不重複提醒也不計次
+ *   同一車牌每次提醒後記一次；5 秒內再讀到視為同一次經過，不重複提醒也不計次
  *   累計達到上限（預設 2 次）後，再讀到只顯示灰色「已辨識過」，不跳卡片、不震動、不出聲
  *   清除紀錄時一併歸零
  * ------------------------------------------------------------ */
-const SEEN_KEY = "plate-seen-v1", REPEAT_GAP = 30000;
+const SEEN_KEY = "plate-seen-v1", REPEAT_GAP = 5000;
 let seen = {};
 try { seen = JSON.parse(localStorage.getItem(SEEN_KEY)||"{}"); } catch(e){}
 const saveSeen = () => { try{ localStorage.setItem(SEEN_KEY, JSON.stringify(seen)); }catch(e){} };
@@ -870,13 +870,13 @@ document.addEventListener("visibilitychange", async () => {
  * 7b. 比對成功大卡片
  *     - 只顯示車牌與電話號碼（純文字，不提供撥號）
  *     - 卡片顯示期間暫停辨識；只有按「繼續掃描」才會關閉（不自動關閉、點背景也不關閉）
- *     - 同一車牌 30 秒內不重複跳出
+ *     - 同一車牌 5 秒內不重複跳出
  * ============================================================ */
 const matchEl = document.getElementById("match");
 let modalOpen = false, modalTimer = null, lastPopped = {};
 function showMatch(plate, kind, note){
   const now = Date.now();
-  if (lastPopped[plate.key] && now - lastPopped[plate.key] < 30000) return;   // 冷卻時間
+  if (lastPopped[plate.key] && now - lastPopped[plate.key] < REPEAT_GAP) return;   // 冷卻時間（與提醒間隔相同）
   lastPopped[plate.key] = now;
   const head = document.getElementById("mhead");
   document.getElementById("mcard").className = kind;
